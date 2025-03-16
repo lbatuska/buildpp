@@ -10,79 +10,49 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-const char* _compiler = "musl-clang";
-const char* _compiler_self = "musl-clang";
-const char* _output_exe = "./program";
-
-static size_t _src_count = 0, _flag_count = 0, _include_dir_count = 0;
-
-char const** _flags = NULL;
-char const** _src_files = NULL;
-char const** _include_dirs = NULL;
-
-void set_compiler(char const* compiler) { _compiler = compiler; }
-void set_compiler_self(char const* compiler) { _compiler_self = compiler; }
-void executable(char const* executable) { _output_exe = executable; }
-
-/*
-@param build the path to the build.{h|cpp} file without extension, eg ./build
-@param self_source path with extension to the builder's cpp file
-@param self_exec we can pass argv(0) to this directly
-@param Static appends -static flag to the self compile command
-
-*/
-void rebuild_self(char const* build, char const* self_source,
-                  char const* self_exec, bool Static) {
-  struct stat build_cpp, build_h, selfs, selfe;
-  size_t len = strlen(build);
-
-  char* h_path = (char*)malloc(sizeof(char) * (len + 1 + 2));
-  char* cpp_path = (char*)malloc(sizeof(char) * (len + 1 + 4));
-
-  memcpy(h_path, build, len);
-  memcpy(cpp_path, build, len);
-  strncpy(h_path + len, ".h\0", 3);
-  strncpy(cpp_path + len, ".cpp\0", 5);
-
-  if (stat(cpp_path, &build_cpp) != 0 || stat(h_path, &build_h) != 0 ||
-      stat(self_source, &selfs) != 0 || stat(self_exec, &selfe) != 0) {
-    perror("stat failed\n");
-    exit(1);
+struct project* current_project = NULL;
+static inline void free_for_each_impl(char** data, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    free((void*)data[i]);
   }
-  setbuf(stdout, NULL);
-  if (build_cpp.st_mtime > selfe.st_mtime ||
-      build_h.st_mtime > selfe.st_mtime || selfs.st_mtime > selfe.st_mtime) {
-    printf("Rebuild needed! -> ");
-    if (fork() == 0) {
-      if (Static) {
-        printf("(%s %s %s -static -o %s) -> ", _compiler, self_source, cpp_path,
-               self_exec);
-        execlp(_compiler, _compiler, self_source, cpp_path, "-static", "-o",
-               self_exec, NULL);
-      } else {
-        printf("(%s %s %s -o %s) -> ", _compiler, self_source, cpp_path,
-               self_exec);
-        execlp(_compiler, _compiler, self_source, cpp_path, "-o", self_exec,
-               NULL);
-      }
-      perror("execlp failed\n");
-      exit(1);
-    }
-    int status;
-    wait(&status);
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-      printf("Rebuild success! Calling self.\n");
-      execl(self_exec, self_exec, NULL);
-      perror("execl failed");
-      exit(1);
-    }
-    perror("exited with status != 0\n");
-    exit(1);
-  }
-  printf("No rebuild needed!\n");
-  return;
+};
+
+void free_project(struct project* p) {
+  free_for_each_impl(p->_extra_files, p->_extra_files_count);
+  free(p->_extra_files);
+  free_for_each_impl(p->_include_dirs, p->_include_dir_count);
+  free(p->_include_dirs);
+  free_for_each_impl(p->_src_files, p->_src_count);
+  free(p->_src_files);
+  free_for_each_impl(p->_flags, p->_flag_count);
+  free(p->_flags);
+  free((void*)p->_executable);
+  free((void*)p->_compiler);
 }
-void add_src_dir(char const* dir) {
+
+struct project* project(char const* executable) {
+  struct project* p = (struct project*)malloc(sizeof(struct project));
+
+  const size_t exec_len = strlen(executable);
+  p->_executable = (char*)malloc(exec_len + 1);
+  p->_executable[exec_len] = '\0';
+  strncpy(p->_executable, executable, exec_len);
+
+  p->_compiler = (char*)malloc(11);
+  strcpy(p->_compiler, "musl-clang");
+
+  return p;
+}
+
+void set_compiler_project(struct project* p, char const* compiler) {
+  if (p->_compiler) free(p->_compiler);
+  const size_t compiler_len = strlen(compiler);
+  p->_compiler = (char*)malloc(compiler_len + 1);
+  p->_compiler[compiler_len] = '\0';
+  strncpy(p->_compiler, compiler, compiler_len);
+}
+
+void add_src_dir_project(struct project* p, const char* dir) {
   struct dirent* entry;
   DIR* directory = opendir(dir);
   if (!directory) {
@@ -90,6 +60,7 @@ void add_src_dir(char const* dir) {
     return;
   }
 
+  // Add a trailing slash
   const size_t orig_len = strlen(dir);
   bool alloced = false;
   if (dir[orig_len - 1] != '/') {
@@ -97,33 +68,40 @@ void add_src_dir(char const* dir) {
     strncpy(d, dir, orig_len);
     d[orig_len] = '/';
     d[orig_len + 1] = '\0';
+    // we allocated dir, we'll need to free it
     alloced = true;
     dir = d;
   }
 
-  const size_t dirlen = strlen(dir);
+  const size_t dirlen = alloced ? orig_len + 1 : orig_len;
 
   while ((entry = readdir(directory)) != NULL) {
     if (entry->d_type == DT_REG) {  // Regular file
       const char* ext = strrchr(entry->d_name, '.');
       if (ext && (strcmp(ext, ".c") == 0 || strcmp(ext, ".cpp") == 0)) {
         const size_t filelen = strlen(entry->d_name);
+        // make malloced path
         char* fullpath = (char*)malloc(dirlen + filelen + 1);
         fullpath[dirlen + filelen] = '\0';
+        // dir path + filename
         strncpy(fullpath, dir, dirlen);
         strncpy(fullpath + dirlen, entry->d_name, filelen);
-        add_source_file(fullpath);
+        // add to source file
+        p->_src_files =
+            (char**)realloc(p->_src_files, sizeof(char*) * (p->_src_count + 1));
+        p->_src_files[p->_src_count++] = fullpath;
       }
     }
   }
 
   closedir(directory);
+
   if (alloced) {
     free((void*)dir);
   }
 }
 
-void add_src_dir_recurse(char const* dirpath) {
+void add_src_dir_recurse_project(struct project* p, const char* dirpath) {
   struct dirent* entry;
   DIR* dir = opendir(dirpath);
 
@@ -132,7 +110,7 @@ void add_src_dir_recurse(char const* dirpath) {
     return;
   }
 
-  add_src_dir(dirpath);  // Call list_c_cpp_files for current directory
+  add_src_dir_project(p, dirpath);
 
   while ((entry = readdir(dir)) != NULL) {
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
@@ -143,86 +121,109 @@ void add_src_dir_recurse(char const* dirpath) {
 
     struct stat path_stat;
     if (stat(fullpath, &path_stat) == 0 && S_ISDIR(path_stat.st_mode)) {
-      add_src_dir_recurse(fullpath);  // Recurse into subdirectory
+      add_src_dir_recurse_project(p, fullpath);  // Recurse into subdirectory
     }
   }
 
   closedir(dir);
 }
 
-void add_source_file(char const* file) {
-  printf("Adding src file %s\n", file);
-  _src_count++;
-  _src_files = (char const**)realloc(_src_files, sizeof(char*) * _src_count);
-  _src_files[_src_count - 1] = file;
+void add_include_dir_project(struct project* p, char const* dir) {
+  p->_include_dirs = (char**)realloc(
+      p->_include_dirs, sizeof(char*) * (p->_include_dir_count + 1));
+  p->_include_dirs[p->_include_dir_count++] = strdup(dir);
 }
 
-void add_flag(char const* flag) {
-  _flag_count++;
-  _flags = (char const**)realloc(_flags, sizeof(char*) * _flag_count);
-  _flags[_flag_count - 1] = flag;
+void add_source_file_project(struct project* p, char const* file) {
+  p->_src_files =
+      (char**)realloc(p->_src_files, sizeof(char*) * (p->_src_count + 1));
+  p->_src_files[p->_src_count++] = strdup(file);
 }
 
-void add_include_dir(char const* dir) {
-  _include_dir_count++;
-  _include_dirs =
-      (char const**)realloc(_include_dirs, sizeof(char*) * _include_dir_count);
-  _include_dirs[_include_dir_count - 1] = dir;
+void add_flag_project(struct project* p, char const* flag) {
+  p->_flags = (char**)realloc(p->_flags, sizeof(char*) * (p->_flag_count + 1));
+  p->_flags[p->_flag_count++] = strdup(flag);
 }
 
-void compile() {
-  // 1+ compiler
-  // +2 for "-o" "executable"
-  // +1 for NULL
-  const size_t len =
-      1 + _flag_count + _src_count + (_include_dir_count * 2) + 2 + 1;
-  char* argv[len];
-  int argc = 0;
+int compile_project(struct project* p) {
+  // 1+ compiler path +2 for "-o" "executable"  +1 for NULL
+  const size_t argv_len = (1 + p->_src_count + p->_flag_count +
+                           (p->_include_dir_count * 2) + 2 + 1);
+  char* argv[argv_len];
+  size_t argc = 0;
+  argv[argc++] = p->_compiler;
 
-  argv[0] = (char*)_compiler;
-  argc++;
-  for (int i = 0; i < _include_dir_count; i++) {
-    argv[argc] = (char*)"-I";
-    argc++;
-
-    argv[argc] = (char*)_include_dirs[i];
-    argc++;
+  char* dash_i = strdup("-I");
+  for (int i = 0; i < p->_include_dir_count; i++) {
+    argv[argc++] = dash_i;
+    argv[argc++] = p->_include_dirs[i];
   }
 
-  for (int i = 0; i < _flag_count; i++) {
-    argv[argc] = (char*)_flags[i];
-    argc++;
+  for (int i = 0; i < p->_flag_count; i++) {
+    argv[argc++] = p->_flags[i];
   }
 
-  for (int i = 0; i < _src_count; i++) {
-    argv[argc] = (char*)_src_files[i];
-    argc++;
+  for (int i = 0; i < p->_src_count; i++) {
+    argv[argc++] = p->_src_files[i];
   }
 
-  argv[len - 3] = (char*)"-o";
-  argc++;
-  argv[len - 2] = (char*)_output_exe;
-  argc++;
+  // End
+  argv[argc++] = strdup("-o");    // argv_len-3
+  argv[argc++] = p->_executable;  // argv_len-2
+  argv[argc++] = NULL;            // argv_len-1
 
-  argv[len - 1] = NULL;
-  setbuf(stdout, NULL);
-  printf("Will run:\n");
+  printf("=> ");
   for (int i = 0; i < argc; i++) {
     printf("%s ", argv[i]);
   }
   printf("\n");
 
   if (fork() == 0) {
-    execvp(_compiler, argv);
+    execvp(p->_compiler, argv);
     perror("execvp failed\n");
     exit(1);
   }
   int status;
   wait(&status);
   if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-    printf("Compilation success!\n");
-    exit(0);
+    return 1;
   }
   perror("exited with status != 0\n");
   exit(1);
+
+  return 0;
+}
+
+void add_extra_file_project(struct project* p, char const* file) {
+  p->_extra_files_count++;
+  p->_extra_files =
+      (char**)realloc(p->_extra_files, sizeof(char*) * (p->_extra_files_count));
+  const size_t file_len = strlen(file);
+  p->_extra_files[p->_extra_files_count - 1] = (char*)malloc(file_len + 1);
+  p->_extra_files[p->_extra_files_count - 1][file_len] = '\0';
+  strncpy(p->_extra_files[p->_extra_files_count - 1], file, file_len);
+}
+
+static inline bool newer_file(long int exec_st_mtime, char** files,
+                              size_t files_len) {
+  struct stat file_stat;
+
+  for (size_t i = 0; i < files_len; i++) {
+    if (stat(files[i], &file_stat) == 0) {
+      if (file_stat.st_mtime > exec_st_mtime) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+int rebuild_needed_project(struct project* p) {
+  struct stat exec_stat;
+  if (stat(p->_executable, &exec_stat) != 0) return 1;
+  if (newer_file(exec_stat.st_mtime, p->_src_files, p->_src_count)) return 1;
+  if (newer_file(exec_stat.st_mtime, p->_extra_files, p->_extra_files_count))
+    return 1;
+
+  return 0;
 }

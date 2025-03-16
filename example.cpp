@@ -1,16 +1,32 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
 #include "build.h"
 
-int main(int argc, char *argv[]) {
-  set_compiler_self("musl-clang");
-  rebuild_self("./buildpp/build", "./buildpp/example.cpp", argv[0], true);
-  set_compiler("clang");
-  executable("./program");
-  add_src_dir_recurse("./src");
-  add_include_dir("./include");
-  add_source_file("./main.cpp");
-  add_flag("-Wall");
-  // add_flag("-static");
-  add_flag("-lstdc++");
-  compile();
+int main(int argc, char* argv[]) {
+  // === SELF ===
+  struct project* self = project(argv[0]);
+  add_source_file_project(self, "./buildpp/build.cpp");
+  add_source_file_project(self, "./build.cpp");
+  set_compiler_project(self, "musl-clang");
+  add_extra_file_project(self, "./buildpp/build.h");
+  add_flag_project(self, "-static");
+  setbuf(stdout, NULL);
+  if (rebuild_needed_project(self)) {
+    printf("Rebuild needed!\n");
+    if (compile_project(self)) {
+      free_project(self);
+      execl(argv[0], argv[0], NULL);
+      perror("execl failed");
+      exit(1);
+    } else {
+      perror("Rebuild failed!\n");
+      exit(1);
+    }
+  }
+  // === SELF ===
+
+  // add an actual project here
   return 0;
 }
