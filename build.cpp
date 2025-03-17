@@ -41,6 +41,8 @@ struct project* project(char const* executable) {
   p->_compiler = (char*)malloc(11);
   strcpy(p->_compiler, "musl-clang");
 
+  current_project = p;
+
   return p;
 }
 

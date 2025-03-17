@@ -20,7 +20,8 @@ extern struct project* current_project;
 inline void set_current_project(struct project* p) { current_project = p; };
 void free_project(struct project* p);
 
-// Creates a new project setting the project's executable (incl path)
+// Creates a new project setting the project's executable (incl path) and sets
+// current_project
 struct project* project(char const* executable);
 void set_compiler_project(struct project* p, char const* compiler);
 void add_src_dir_project(struct project* p, const char* dir);
@@ -33,11 +34,6 @@ void add_extra_file_project(struct project* p, char const* file);
 // Compares all source files (+ extra files) (not checking includes) and returns
 // non 0 if modification time of any is newer than the executable's
 int rebuild_needed_project(struct project* p);
-
-// =================== SELF
-void set_compiler_self(char const* compiler);
-void rebuild_self(char const* build, char const* self_source,
-                  char const* self_exec, bool Static);
 
 // These functions operate on current_project
 inline void set_compiler(char const* compiler) {
